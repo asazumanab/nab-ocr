@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>にいがたAIビジネス AI-OCR</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', 'Hiragino Sans', 'Meiryo', sans-serif; background: #f0f2f5; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Header */
+.header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 12px 20px 12px 8px; background: #fff; border-bottom: 1px solid #e0e0e0; flex-shrink: 0; }
+.header-left { display: flex; align-items: center; flex: 1; min-width: 0; }
+.app-icon { width: 100%; max-width: 660px; display: flex; align-items: center; margin-left: -8px; }
+.app-icon img { width: 100%; max-width: 660px; max-height: 56px; height: auto; display: block; object-fit: contain; }
+.app-title { display: none; }
+.upload-btn { display: flex; align-items: center; gap: 8px; padding: 10px 20px; border: 1px solid #dadce0; border-radius: 8px; background: #fff; cursor: pointer; font-size: 14px; color: #3c4043; transition: all 0.2s; }
+.upload-btn:hover { background: #f8f9fa; border-color: #1a73e8; color: #1a73e8; }
+.upload-btn svg { width: 18px; height: 18px; }
+.header-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-shrink: 0; }
+
+/* Main Layout */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* Left Panel - PDF Preview */
+.left-panel { flex: 1; background: #e8eaed; display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.pdf-container { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; overflow: auto; }
+.pdf-placeholder { text-align: center; color: #9aa0a6; }
+.pdf-placeholder svg { width: 64px; height: 64px; margin-bottom: 12px; opacity: 0.5; }
+.pdf-placeholder p { font-size: 14px; }
+.canvas-wrapper { position: relative; display: inline-block; }
+.canvas-wrapper canvas { display: block; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+.overlay-canvas { position: absolute; top: 0; left: 0; cursor: crosshair; }
+.page-nav { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; background: #fff; border-top: 1px solid #e0e0e0; flex-shrink: 0; }
+.page-nav button { padding: 6px 14px; border: 1px solid #dadce0; border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px; }
+.page-nav button:hover:not(:disabled) { background: #f1f3f4; }
+.page-nav button:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-nav span { font-size: 13px; color: #5f6368; }
+
+/* Right Panel */
+.right-panel { width: 400px; background: #fff; border-left: 1px solid #e0e0e0; display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0; }
+.right-content { flex: 1; overflow-y: auto; padding: 16px; }
+
+/* Steps */
+.step-title { font-size: 15px; font-weight: 600; color: #202124; margin-bottom: 10px; }
+.action-btn { width: 100%; padding: 12px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s; margin-bottom: 6px; }
+.action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-ai { background: linear-gradient(135deg, #f9ab00, #e8710a); color: #fff; }
+.btn-ai:hover:not(:disabled) { background: linear-gradient(135deg, #f29900, #d56200); }
+.btn-ocr { background: linear-gradient(135deg, #f9ab00, #e8710a); color: #fff; }
+.btn-ocr:hover:not(:disabled) { background: linear-gradient(135deg, #f29900, #d56200); }
+.btn-csv { background: linear-gradient(135deg, #34a853, #1e8e3e); color: #fff; margin-top: 10px; }
+.btn-csv:hover:not(:disabled) { background: linear-gradient(135deg, #2d9249, #1a7a35); }
+.step-note { font-size: 11px; color: #9aa0a6; margin-bottom: 16px; }
+.step-divider { border: none; border-top: 1px solid #e0e0e0; margin: 16px 0; }
+.export-controls { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.export-label { font-size: 12px; font-weight: 600; color: #5f6368; }
+.export-select { width: 100%; padding: 10px 12px; border: 1px solid #dadce0; border-radius: 8px; background: #fff; font-size: 13px; color: #202124; }
+.export-select:focus { border-color: #1a73e8; outline: none; }
+
+/* Extraction Items */
+.extraction-items { margin-bottom: 16px; }
+.extraction-empty { font-size: 12px; color: #9aa0a6; padding: 12px; background: #f8f9fa; border-radius: 8px; text-align: center; line-height: 1.6; }
+.extraction-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #f8f9fa; border-radius: 6px; margin-bottom: 6px; border-left: 3px solid #1a73e8; }
+.extraction-item .label { flex: 1; font-size: 13px; color: #202124; }
+.extraction-item .label input { width: 100%; border: 1px solid transparent; background: transparent; font-size: 13px; padding: 2px 4px; border-radius: 4px; }
+.extraction-item .label input:focus { border-color: #1a73e8; background: #fff; outline: none; }
+.extraction-item .delete-btn { width: 24px; height: 24px; border: none; background: none; cursor: pointer; color: #ea4335; font-size: 16px; border-radius: 4px; display: flex; align-items: center; justify-content: center; }
+.extraction-item .delete-btn:hover { background: #fce8e6; }
+
+/* OCR Results */
+.result-tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+.result-tab { padding: 6px 14px; border: 1px solid #dadce0; border-radius: 20px; background: #fff; cursor: pointer; font-size: 12px; color: #5f6368; transition: all 0.2s; }
+.result-tab.active { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+.result-tab:hover:not(.active) { background: #f1f3f4; }
+.result-field { padding: 10px; background: #f8f9fa; border-radius: 8px; margin-bottom: 8px; cursor: pointer; transition: all 0.2s; border: 1px solid transparent; }
+.result-field:hover { border-color: #1a73e8; }
+.result-field.active { border-color: #1a73e8; background: #e8f0fe; }
+.result-field-label { font-size: 11px; color: #5f6368; margin-bottom: 4px; font-weight: 600; }
+.result-field-value { width: 100%; border: 1px solid #dadce0; border-radius: 4px; padding: 6px 8px; font-size: 13px; background: #fff; }
+.result-field-value:focus { border-color: #1a73e8; outline: none; }
+
+/* System Console */
+.console-panel { border-top: 1px solid #e0e0e0; flex-shrink: 0; max-height: 200px; display: flex; flex-direction: column; }
+.console-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #263238; color: #80cbc4; font-size: 13px; font-weight: 600; flex-shrink: 0; }
+.console-header .icon { margin-right: 6px; }
+.console-clear { border: none; background: none; color: #80cbc4; cursor: pointer; font-size: 12px; }
+.console-clear:hover { color: #b2dfdb; }
+.console-body { background: #263238; padding: 8px 16px; overflow-y: auto; flex: 1; min-height: 60px; }
+.console-line { font-size: 12px; color: #b0bec5; font-family: 'Consolas', 'Monaco', monospace; line-height: 1.8; }
+.console-line.info { color: #80cbc4; }
+.console-line.success { color: #a5d6a7; }
+.console-line.error { color: #ef9a9a; }
+.console-line.warn { color: #ffe082; }
+.console-line .timestamp { color: #546e7a; margin-right: 8px; }
+
+/* API Key Modal */
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal-overlay.hidden { display: none; }
+.modal { background: #fff; border-radius: 16px; padding: 32px; width: 480px; max-width: 90vw; }
+.modal h2 { font-size: 18px; margin-bottom: 8px; color: #202124; }
+.modal p { font-size: 13px; color: #5f6368; margin-bottom: 16px; line-height: 1.6; }
+.modal input[type="password"], .modal input[type="text"], .modal input[type="url"] { width: 100%; padding: 10px 14px; border: 1px solid #dadce0; border-radius: 8px; font-size: 14px; margin-bottom: 16px; }
+.modal input[type="password"]:focus, .modal input[type="text"]:focus, .modal input[type="url"]:focus { border-color: #1a73e8; outline: none; }
+.modal label { display: block; font-size: 12px; font-weight: 600; color: #5f6368; margin-bottom: 6px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-actions button { padding: 10px 24px; border-radius: 8px; font-size: 14px; cursor: pointer; border: none; }
+.modal-actions .cancel { background: #f1f3f4; color: #5f6368; }
+.modal-actions .confirm { background: #1a73e8; color: #fff; }
+
+/* Loading spinner */
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Drag region visual */
+.drag-region { position: absolute; border: 2px dashed #1a73e8; background: rgba(26, 115, 232, 0.1); pointer-events: none; }
+
+@media (max-width: 900px) {
+  .header { padding: 12px 16px 12px 10px; }
+  .header { flex-direction: column; align-items: stretch; gap: 12px; }
+  .app-icon { margin-left: -4px; }
+  .app-icon { max-width: 100%; }
+  .app-icon img { max-width: 100%; }
+  .header-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .main { flex-direction: column; }
+  .left-panel, .right-panel { width: 100%; }
+  .right-panel { border-left: none; border-top: 1px solid #e0e0e0; max-height: 46vh; }
+}
+</style>
+</head>
+<body>
+
+<!-- API Key Modal -->
+<div class="modal-overlay hidden" id="apiKeyModal">
+  <div class="modal">
+    <h2>Gemini API キーの設定</h2>
+    <p>AI機能を利用するには、Google AI Studio で発行した Gemini API キーが必要です。<br>キーはブラウザのローカルストレージに保存され、外部には送信されません（Gemini API 呼び出し時を除く）。</p>
+    <input type="password" id="apiKeyInput" placeholder="Gemini API Key を入力してください">
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeApiKeyModal()">キャンセル</button>
+      <button class="confirm" onclick="saveApiKey()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Export Settings Modal -->
+<div class="modal-overlay hidden" id="exportSettingsModal">
+  <div class="modal">
+    <h2>出力設定</h2>
+    <p>Googleスプレッドシートへ反映する場合に使用する、Google Apps Script WebアプリURLとシート名を設定します。設定値はブラウザのローカルストレージに保存されます。</p>
+    <label for="webAppUrlInput">Apps Script WebアプリURL</label>
+    <input type="url" id="webAppUrlInput" placeholder="https://script.google.com/macros/s/.../exec">
+    <label for="sheetNameInput">シート名</label>
+    <input type="text" id="sheetNameInput" placeholder="OCR結果">
+    <div class="modal-actions">
+      <button class="cancel" onclick="closeExportSettingsModal()">キャンセル</button>
+      <button class="confirm" onclick="saveExportSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="app-icon">
+      <img src="./assets/logo-japanese-horizontal.png" alt="にいがたAIビジネス ロゴ">
+    </div>
+    <span class="app-title">NAB AI-OCR</span>
+  </div>
+  <div class="header-actions">
+    <button class="upload-btn" onclick="openExportSettingsModal()" title="スプレッドシート出力設定">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 2v4M16 2v4M4 10h16"/><path d="M8 14h3M13 14h3M8 18h3M13 18h3"/></svg>
+      出力設定
+    </button>
+    <button class="upload-btn" onclick="document.getElementById('apiKeyModal').classList.remove('hidden')" title="API Key設定">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
+      API Key
+    </button>
+    <button class="upload-btn" onclick="document.getElementById('pdfInput').click()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+      PDFをアップロード
+    </button>
+    <input type="file" id="pdfInput" accept=".pdf" hidden>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+  <!-- Left Panel -->
+  <div class="left-panel">
+    <div class="pdf-container" id="pdfContainer">
+      <div class="pdf-placeholder" id="pdfPlaceholder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg>
+        <p>PDFをアップロードするとここに表示されます</p>
+      </div>
+      <div class="canvas-wrapper" id="canvasWrapper" style="display:none;">
+        <canvas id="pdfCanvas"></canvas>
+        <canvas id="overlayCanvas" class="overlay-canvas"></canvas>
+      </div>
+    </div>
+    <div class="page-nav" id="pageNav" style="display:none;">
+      <button id="prevPage" onclick="changePage(-1)">◀ 前のページ</button>
+      <span id="pageInfo">1 / 1</span>
+      <button id="nextPage" onclick="changePage(1)">次のページ ▶</button>
+    </div>
+  </div>
+
+  <!-- Right Panel -->
+  <div class="right-panel">
+    <div class="right-content" id="rightContent">
+      <!-- Step 1 -->
+      <div id="step1Section">
+        <div class="step-title">ステップ 1: 抽出領域の設定</div>
+        <button class="action-btn btn-ai" id="btnAutoDetect" onclick="autoDetectRegions()" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          AIで領域を自動特定
+        </button>
+        <div class="step-note">※画像上をドラッグして手動で追加・調整も可能です</div>
+        <div class="extraction-items" id="extractionItems">
+          <div class="extraction-empty" id="extractionEmpty">
+            抽出する項目がありません。AI自動特定を実行するか、左側のプレビューをドラッグして領域を作成してください。
+          </div>
+        </div>
+      </div>
+
+      <hr class="step-divider">
+
+      <!-- Step 2 -->
+      <div id="step2Section">
+        <div class="step-title">ステップ 2: OCR実行</div>
+        <button class="action-btn btn-ocr" id="btnOcr" onclick="executeOCR()" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
+          全ページ OCR 実行
+        </button>
+      </div>
+
+      <hr class="step-divider">
+
+      <!-- Results -->
+      <div id="resultsSection" style="display:none;">
+        <div class="step-title">OCR結果</div>
+        <div class="result-tabs" id="resultTabs"></div>
+        <div id="resultFields"></div>
+        <div class="export-controls">
+          <label class="export-label" for="exportDestinationSelect">出力先</label>
+          <select class="export-select" id="exportDestinationSelect" onchange="updateExportDestination(this.value)">
+            <option value="csv">CSV保存</option>
+            <option value="spreadsheet">Googleスプレッドシートへ反映</option>
+          </select>
+        </div>
+        <button class="action-btn btn-csv" id="exportActionBtn" onclick="handleExport()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+          <span>CSV を保存</span>
+        </button>
+        <div class="step-note">CSV保存またはGoogleスプレッドシートへの末尾追記を選べます。</div>
+      </div>
+    </div>
+
+    <!-- Console -->
+    <div class="console-panel">
+      <div class="console-header">
+        <span><span class="icon">⚡</span>システムコンソール (AIプロセス)</span>
+        <button class="console-clear" onclick="clearConsole()">クリア</button>
+      </div>
+      <div class="console-body" id="consoleBody">
+        <div class="console-line info">システム待機中... アクションを実行してください。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+// State
+let pdfDoc = null;
+let currentPage = 1;
+let totalPages = 0;
+let pdfPages = []; // canvas images per page
+let extractionRegions = []; // [{id, label, x, y, w, h}]
+let ocrResults = {}; // {pageNum: [{label, value, region}]}
+let activeResultPage = 1;
+let scale = 1.5;
+let isDrawing = false;
+let drawStart = null;
+let regionIdCounter = 0;
+let pdfArrayBuffer = null;
+let pdfFileName = null;
+let exportDestination = localStorage.getItem('nab_ai_ocr_export_destination') || 'csv';
+if (!['csv', 'spreadsheet'].includes(exportDestination)) {
+  exportDestination = 'csv';
+}
+
+// Elements
+const pdfContainer = document.getElementById('pdfContainer');
+const pdfPlaceholder = document.getElementById('pdfPlaceholder');
+const canvasWrapper = document.getElementById('canvasWrapper');
+const pdfCanvas = document.getElementById('pdfCanvas');
+const overlayCanvas = document.getElementById('overlayCanvas');
+const pageNav = document.getElementById('pageNav');
+const consoleBody = document.getElementById('consoleBody');
+const exportDestinationSelect = document.getElementById('exportDestinationSelect');
+const exportActionBtn = document.getElementById('exportActionBtn');
+
+const STORAGE_KEYS = {
+  apiKey: 'gemini_api_key',
+  exportDestination: 'nab_ai_ocr_export_destination',
+  webAppUrl: 'nab_ai_ocr_web_app_url',
+  sheetName: 'nab_ai_ocr_sheet_name'
+};
+
+// Console logging
+function logConsole(msg, type = '') {
+  const now = new Date();
+  const ts = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+  const line = document.createElement('div');
+  line.className = `console-line ${type}`;
+  line.innerHTML = `<span class="timestamp">[${ts}]</span>${msg}`;
+  consoleBody.appendChild(line);
+  consoleBody.scrollTop = consoleBody.scrollHeight;
+}
+function clearConsole() {
+  consoleBody.innerHTML = '<div class="console-line info">システム待機中... アクションを実行してください。</div>';
+}
+
+// PDF Upload
+document.getElementById('pdfInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  pdfFileName = file.name;
+  logConsole(`PDFファイル「${file.name}」を読み込み中...`, 'info');
+  const arrayBuffer = await file.arrayBuffer();
+  pdfArrayBuffer = arrayBuffer.slice(0);
+  try {
+    pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    totalPages = pdfDoc.numPages;
+    currentPage = 1;
+    pdfPages = [];
+    logConsole(`PDF読み込み完了: ${totalPages}ページ`, 'success');
+    pdfPlaceholder.style.display = 'none';
+    canvasWrapper.style.display = 'inline-block';
+    pageNav.style.display = 'flex';
+    document.getElementById('btnAutoDetect').disabled = false;
+    await renderPage(currentPage);
+    updatePageNav();
+  } catch (err) {
+    logConsole(`PDF読み込みエラー: ${err.message}`, 'error');
+  }
+});
+
+async function renderPage(num) {
+  const page = await pdfDoc.getPage(num);
+  const viewport = page.getViewport({ scale });
+  pdfCanvas.width = viewport.width;
+  pdfCanvas.height = viewport.height;
+  overlayCanvas.width = viewport.width;
+  overlayCanvas.height = viewport.height;
+  const ctx = pdfCanvas.getContext('2d');
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  drawRegions();
+}
+
+function updatePageNav() {
+  document.getElementById('pageInfo').textContent = `${currentPage} / ${totalPages}`;
+  document.getElementById('prevPage').disabled = currentPage <= 1;
+  document.getElementById('nextPage').disabled = currentPage >= totalPages;
+}
+
+function changePage(delta) {
+  const newPage = currentPage + delta;
+  if (newPage >= 1 && newPage <= totalPages) {
+    currentPage = newPage;
+    renderPage(currentPage);
+    updatePageNav();
+    if (ocrResults[currentPage]) {
+      showResultPage(currentPage);
+    }
+  }
+}
+
+// Drawing regions
+overlayCanvas.addEventListener('mousedown', (e) => {
+  if (!pdfDoc) return;
+  const rect = overlayCanvas.getBoundingClientRect();
+  isDrawing = true;
+  drawStart = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+});
+
+overlayCanvas.addEventListener('mousemove', (e) => {
+  if (!isDrawing || !drawStart) return;
+  const rect = overlayCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  drawRegions();
+  const ctx = overlayCanvas.getContext('2d');
+  ctx.strokeStyle = '#1a73e8';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 3]);
+  ctx.fillStyle = 'rgba(26, 115, 232, 0.1)';
+  const w = x - drawStart.x;
+  const h = y - drawStart.y;
+  ctx.fillRect(drawStart.x, drawStart.y, w, h);
+  ctx.strokeRect(drawStart.x, drawStart.y, w, h);
+  ctx.setLineDash([]);
+});
+
+overlayCanvas.addEventListener('mouseup', (e) => {
+  if (!isDrawing || !drawStart) return;
+  isDrawing = false;
+  const rect = overlayCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const w = Math.abs(x - drawStart.x);
+  const h = Math.abs(y - drawStart.y);
+  if (w > 10 && h > 10) {
+    const region = {
+      id: ++regionIdCounter,
+      label: `新規項目${regionIdCounter}`,
+      x: Math.min(drawStart.x, x),
+      y: Math.min(drawStart.y, y),
+      w, h
+    };
+    extractionRegions.push(region);
+    updateExtractionList();
+    drawRegions();
+    logConsole(`手動で領域を追加: 「${region.label}」`, 'info');
+    document.getElementById('btnOcr').disabled = false;
+  }
+  drawStart = null;
+});
+
+function drawRegions() {
+  const ctx = overlayCanvas.getContext('2d');
+  ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  const colors = ['#1a73e8', '#ea4335', '#34a853', '#fbbc04', '#9334e6', '#e8710a', '#1a73e8', '#ea4335'];
+  extractionRegions.forEach((r, i) => {
+    const color = colors[i % colors.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.fillStyle = color.replace(')', ', 0.08)').replace('rgb', 'rgba').replace('#', '');
+    // Convert hex to rgba
+    const hex = color;
+    const bigint = parseInt(hex.slice(1), 16);
+    const cr = (bigint >> 16) & 255;
+    const cg = (bigint >> 8) & 255;
+    const cb = bigint & 255;
+    ctx.fillStyle = `rgba(${cr}, ${cg}, ${cb}, 0.08)`;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    // Label
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#fff';
+    const tw = ctx.measureText(r.label).width + 8;
+    ctx.fillStyle = color;
+    ctx.fillRect(r.x, r.y - 20, tw, 20);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(r.label, r.x + 4, r.y - 6);
+  });
+}
+
+function updateExtractionList() {
+  const container = document.getElementById('extractionItems');
+  const empty = document.getElementById('extractionEmpty');
+  if (extractionRegions.length === 0) {
+    empty.style.display = 'block';
+    container.querySelectorAll('.extraction-item').forEach(el => el.remove());
+    return;
+  }
+  empty.style.display = 'none';
+  // Rebuild
+  container.querySelectorAll('.extraction-item').forEach(el => el.remove());
+  extractionRegions.forEach((r) => {
+    const item = document.createElement('div');
+    item.className = 'extraction-item';
+    item.innerHTML = `
+      <div class="label"><input type="text" value="${r.label}" onchange="renameRegion(${r.id}, this.value)"></div>
+      <button class="delete-btn" onclick="deleteRegion(${r.id})" title="削除">✕</button>
+    `;
+    container.appendChild(item);
+  });
+}
+
+function renameRegion(id, newLabel) {
+  const r = extractionRegions.find(r => r.id === id);
+  if (r) {
+    r.label = newLabel;
+    drawRegions();
+  }
+}
+
+function deleteRegion(id) {
+  extractionRegions = extractionRegions.filter(r => r.id !== id);
+  updateExtractionList();
+  drawRegions();
+  if (extractionRegions.length === 0) {
+    document.getElementById('btnOcr').disabled = true;
+  }
+  logConsole(`領域を削除しました`, 'info');
+}
+
+// API Key
+function getApiKey() {
+  return localStorage.getItem(STORAGE_KEYS.apiKey) || '';
+}
+function saveApiKey() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  if (key) {
+    localStorage.setItem(STORAGE_KEYS.apiKey, key);
+    logConsole('API キーを保存しました', 'success');
+  }
+  closeApiKeyModal();
+}
+function closeApiKeyModal() {
+  document.getElementById('apiKeyModal').classList.add('hidden');
+}
+
+function getExportSettings() {
+  return {
+    webAppUrl: localStorage.getItem(STORAGE_KEYS.webAppUrl) || '',
+    sheetName: localStorage.getItem(STORAGE_KEYS.sheetName) || ''
+  };
+}
+
+function openExportSettingsModal() {
+  const settings = getExportSettings();
+  document.getElementById('webAppUrlInput').value = settings.webAppUrl;
+  document.getElementById('sheetNameInput').value = settings.sheetName;
+  document.getElementById('exportSettingsModal').classList.remove('hidden');
+}
+
+function closeExportSettingsModal() {
+  document.getElementById('exportSettingsModal').classList.add('hidden');
+}
+
+function saveExportSettings() {
+  const webAppUrl = document.getElementById('webAppUrlInput').value.trim();
+  const sheetName = document.getElementById('sheetNameInput').value.trim();
+  localStorage.setItem(STORAGE_KEYS.webAppUrl, webAppUrl);
+  localStorage.setItem(STORAGE_KEYS.sheetName, sheetName);
+  closeExportSettingsModal();
+  if (webAppUrl && sheetName) {
+    logConsole(`スプレッドシート出力設定を保存しました (シート: ${sheetName})`, 'success');
+  } else {
+    logConsole('スプレッドシート出力設定を更新しました', 'info');
+  }
+}
+
+function updateExportDestination(value) {
+  exportDestination = value;
+  localStorage.setItem(STORAGE_KEYS.exportDestination, value);
+  updateExportActionButton();
+}
+
+function updateExportActionButton() {
+  if (!exportActionBtn) return;
+  const label = exportDestination === 'spreadsheet' ? 'スプレッドシートに反映' : 'CSV を保存';
+  const labelEl = exportActionBtn.querySelector('span');
+  if (labelEl) {
+    labelEl.textContent = label;
+  }
+  if (exportDestinationSelect && exportDestinationSelect.value !== exportDestination) {
+    exportDestinationSelect.value = exportDestination;
+  }
+}
+
+// Gemini API call
+async function callGemini(prompt, imageBase64 = null) {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    document.getElementById('apiKeyModal').classList.remove('hidden');
+    throw new Error('API キーが設定されていません');
+  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const parts = [];
+  if (imageBase64) {
+    parts.push({
+      inlineData: {
+        mimeType: 'image/png',
+        data: imageBase64
+      }
+    });
+  }
+  parts.push({ text: prompt });
+  const body = {
+    contents: [{ parts }],
+    generationConfig: { temperature: 0.1 }
+  };
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`API Error: ${resp.status} ${err}`);
+  }
+  const data = await resp.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
+// Auto-detect regions
+async function autoDetectRegions() {
+  if (!pdfDoc) return;
+  const btn = document.getElementById('btnAutoDetect');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> AI解析中...';
+  logConsole('AIによる抽出領域の自動特定を開始...', 'info');
+  try {
+    // Render page 1 to get image
+    const page = await pdfDoc.getPage(1);
+    const viewport = page.getViewport({ scale });
+    const tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = viewport.width;
+    tmpCanvas.height = viewport.height;
+    const ctx = tmpCanvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const dataUrl = tmpCanvas.toDataURL('image/png');
+    const base64 = dataUrl.split(',')[1];
+
+    logConsole('1ページ目の画像をAIモデルに送信中...', 'info');
+
+    const prompt = `この書類画像を分析して、OCRで抽出すべきフィールド（ラベルと値のペア）を特定してください。
+各フィールドについて、画像内でのおおよその位置をピクセル座標で示してください。
+画像のサイズは幅${viewport.width}px、高さ${viewport.height}pxです。
+
+以下のJSON形式で応答してください（JSONのみ、説明文不要）:
+[
+  {"label": "フィールド名", "x": 左端X座標, "y": 上端Y座標, "w": 幅, "h": 高さ},
+  ...
+]
+
+注意:
+- ラベル（見出し）ではなく、値が書かれている領域の座標を返してください
+- 座標はピクセル単位で、画像の左上を原点としてください
+- 主要なフィールドを漏れなく検出してください`;
+
+    const result = await callGemini(prompt, base64);
+    logConsole('AI応答を受信、解析中...', 'info');
+
+    // Parse JSON from response
+    let regions;
+    try {
+      const jsonMatch = result.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        regions = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('JSON not found');
+      }
+    } catch (e) {
+      logConsole(`AI応答の解析に失敗: ${e.message}`, 'error');
+      logConsole(`応答内容: ${result.substring(0, 200)}...`, 'warn');
+      return;
+    }
+
+    extractionRegions = [];
+    regions.forEach(r => {
+      extractionRegions.push({
+        id: ++regionIdCounter,
+        label: r.label,
+        x: Math.max(0, r.x),
+        y: Math.max(0, r.y),
+        w: Math.min(r.w, viewport.width - r.x),
+        h: Math.min(r.h, viewport.height - r.y)
+      });
+    });
+
+    updateExtractionList();
+    drawRegions();
+    document.getElementById('btnOcr').disabled = false;
+    logConsole(`抽出領域を ${extractionRegions.length} 件特定しました`, 'success');
+  } catch (err) {
+    logConsole(`エラー: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg> AIで領域を自動特定`;
+  }
+}
+
+// OCR Execution
+async function executeOCR() {
+  if (!pdfDoc || extractionRegions.length === 0) return;
+  const btn = document.getElementById('btnOcr');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> OCR実行中...';
+  ocrResults = {};
+
+  const startTime = new Date();
+  logConsole(`全ページOCR処理を開始 (${totalPages}ページ)`, 'info');
+
+  try {
+    for (let p = 1; p <= totalPages; p++) {
+      logConsole(`ページ ${p}/${totalPages} を処理中...`, 'info');
+      const page = await pdfDoc.getPage(p);
+      const viewport = page.getViewport({ scale });
+      const tmpCanvas = document.createElement('canvas');
+      tmpCanvas.width = viewport.width;
+      tmpCanvas.height = viewport.height;
+      const ctx = tmpCanvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const dataUrl = tmpCanvas.toDataURL('image/png');
+      const base64 = dataUrl.split(',')[1];
+
+      logConsole(`ページ ${p}: AIモデルによる探索抽出を実行中...`, 'info');
+
+      const fieldsDesc = extractionRegions.map(r =>
+        `- "${r.label}": 画像座標 (x=${Math.round(r.x)}, y=${Math.round(r.y)}, w=${Math.round(r.w)}, h=${Math.round(r.h)})`
+      ).join('\n');
+
+      const prompt = `この書類画像からOCR（文字認識）を実行してください。
+以下の抽出領域が定義されています。各領域に対応する値を読み取ってください。
+
+抽出領域:
+${fieldsDesc}
+
+画像サイズ: ${viewport.width}px × ${viewport.height}px
+
+以下のJSON形式で応答してください（JSONのみ、説明文不要）:
+[
+  {"label": "フィールド名", "value": "読み取った値"},
+  ...
+]
+
+注意:
+- 値が読み取れない場合は "不明" としてください
+- 手書き文字も含めて最大限読み取ってください
+- 改行が含まれる場合はそのまま含めてください`;
+
+      const result = await callGemini(prompt, base64);
+      logConsole(`ページ ${p}: AI応答を受信`, 'success');
+
+      try {
+        const jsonMatch = result.match(/\[[\s\S]*\]/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          ocrResults[p] = parsed.map((item, idx) => ({
+            label: item.label,
+            value: item.value || '不明',
+            region: extractionRegions[idx] || null
+          }));
+        }
+      } catch (e) {
+        logConsole(`ページ ${p}: 結果解析エラー`, 'error');
+        ocrResults[p] = extractionRegions.map(r => ({
+          label: r.label,
+          value: '解析エラー',
+          region: r
+        }));
+      }
+    }
+
+    const endTime = new Date();
+    const elapsed = ((endTime - startTime) / 1000).toFixed(1);
+    logConsole(`全てのページのOCR処理が完了しました (${elapsed}秒)`, 'success');
+    logConsole('右パネルで結果を確認してください。', 'info');
+
+    // Show results
+    showResults();
+  } catch (err) {
+    logConsole(`OCRエラー: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg> 全ページ OCR 実行`;
+  }
+}
+
+function showResults() {
+  document.getElementById('resultsSection').style.display = 'block';
+  // Create tabs
+  const tabsContainer = document.getElementById('resultTabs');
+  tabsContainer.innerHTML = '';
+  for (let p = 1; p <= totalPages; p++) {
+    const tab = document.createElement('button');
+    tab.className = `result-tab ${p === 1 ? 'active' : ''}`;
+    tab.textContent = `ページ ${p}`;
+    tab.onclick = () => {
+      showResultPage(p);
+      currentPage = p;
+      renderPage(p);
+      updatePageNav();
+    };
+    tabsContainer.appendChild(tab);
+  }
+  showResultPage(1);
+}
+
+function showResultPage(pageNum) {
+  activeResultPage = pageNum;
+  // Update tabs
+  document.querySelectorAll('.result-tab').forEach((tab, i) => {
+    tab.classList.toggle('active', i + 1 === pageNum);
+  });
+  // Show fields
+  const container = document.getElementById('resultFields');
+  container.innerHTML = '';
+  const results = ocrResults[pageNum] || [];
+  results.forEach((r, idx) => {
+    const field = document.createElement('div');
+    field.className = 'result-field';
+    field.onclick = () => highlightRegion(r.region, field);
+    field.innerHTML = `
+      <div class="result-field-label">${r.label}</div>
+      <input class="result-field-value" type="text" value="${escapeHtml(r.value)}" onchange="updateResult(${pageNum}, ${idx}, this.value)" onclick="event.stopPropagation()">
+    `;
+    container.appendChild(field);
+  });
+}
+
+function highlightRegion(region, fieldEl) {
+  if (!region) return;
+  // Remove active from all fields
+  document.querySelectorAll('.result-field').forEach(f => f.classList.remove('active'));
+  fieldEl.classList.add('active');
+  // Draw highlight
+  drawRegions();
+  const ctx = overlayCanvas.getContext('2d');
+  ctx.strokeStyle = '#ea4335';
+  ctx.lineWidth = 3;
+  ctx.fillStyle = 'rgba(234, 67, 53, 0.15)';
+  ctx.fillRect(region.x, region.y, region.w, region.h);
+  ctx.strokeRect(region.x, region.y, region.w, region.h);
+}
+
+function updateResult(pageNum, idx, newValue) {
+  if (ocrResults[pageNum] && ocrResults[pageNum][idx]) {
+    ocrResults[pageNum][idx].value = newValue;
+  }
+}
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function buildExportTable() {
+  if (Object.keys(ocrResults).length === 0) {
+    return null;
+  }
+  const allLabels = new Set();
+  Object.values(ocrResults).forEach(pageResults => {
+    pageResults.forEach(r => allLabels.add(r.label));
+  });
+  const labels = Array.from(allLabels);
+  const headers = ['ページ', ...labels];
+  const rows = [];
+  for (let p = 1; p <= totalPages; p++) {
+    const row = [p];
+    labels.forEach(label => {
+      const result = (ocrResults[p] || []).find(r => r.label === label);
+      row.push(result?.value || '');
+    });
+    rows.push(row);
+  }
+  return { headers, rows };
+}
+
+function downloadCSV(table) {
+  let csv = table.headers.map(h => `"${String(h).replace(/"/g, '""')}"`).join(',') + '\n';
+  table.rows.forEach(row => {
+    csv += row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',') + '\n';
+  });
+  const bom = '\uFEFF';
+  const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ocr_results_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  logConsole('CSVファイルをエクスポートしました', 'success');
+}
+
+async function exportToSpreadsheet(table) {
+  const settings = getExportSettings();
+  const missing = [];
+  if (!settings.webAppUrl) missing.push('Apps Script WebアプリURL');
+  if (!settings.sheetName) missing.push('シート名');
+  if (missing.length > 0) {
+    logConsole(`スプレッドシート設定が不足しています: ${missing.join(' / ')}`, 'warn');
+    openExportSettingsModal();
+    return;
+  }
+
+  logConsole(`Googleスプレッドシート「${settings.sheetName}」へ反映中...`, 'info');
+  const response = await fetch(settings.webAppUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sheetName: settings.sheetName,
+      headers: table.headers,
+      rows: table.rows,
+      exportedAt: new Date().toISOString(),
+      sourceFileName: pdfFileName
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`HTTP ${response.status}: ${errorText}`);
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch (err) {
+    throw new Error('Apps ScriptレスポンスのJSON解析に失敗しました');
+  }
+
+  if (data.ok !== true) {
+    throw new Error(data.message || 'スプレッドシート反映に失敗しました');
+  }
+
+  logConsole(`${data.appendedRows || table.rows.length}行を「${data.sheetName || settings.sheetName}」へ追記しました`, 'success');
+}
+
+async function handleExport() {
+  const table = buildExportTable();
+  if (!table) {
+    logConsole('エクスポートするOCR結果がありません', 'warn');
+    return;
+  }
+
+  exportActionBtn.disabled = true;
+  const originalLabel = exportActionBtn.querySelector('span')?.textContent || '';
+  exportActionBtn.innerHTML = '<span class="spinner"></span><span>出力中...</span>';
+
+  try {
+    if (exportDestination === 'spreadsheet') {
+      await exportToSpreadsheet(table);
+    } else {
+      logConsole('CSVエクスポートを開始...', 'info');
+      downloadCSV(table);
+    }
+  } catch (err) {
+    logConsole(`出力エラー: ${err.message}`, 'error');
+  } finally {
+    exportActionBtn.disabled = false;
+    exportActionBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg><span>${originalLabel || (exportDestination === 'spreadsheet' ? 'スプレッドシートに反映' : 'CSV を保存')}</span>`;
+  }
+}
+
+// Init
+if (getApiKey()) {
+  document.getElementById('apiKeyInput').value = getApiKey();
+}
+if (exportDestinationSelect) {
+  exportDestinationSelect.value = exportDestination;
+}
+const savedExportSettings = getExportSettings();
+document.getElementById('webAppUrlInput').value = savedExportSettings.webAppUrl;
+document.getElementById('sheetNameInput').value = savedExportSettings.sheetName;
+updateExportActionButton();
+</script>
+</body>
+</html>
