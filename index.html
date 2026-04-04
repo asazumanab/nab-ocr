@@ -25,11 +25,11 @@ body { font-family: 'Segoe UI', 'Hiragino Sans', 'Meiryo', sans-serif; backgroun
 
 /* Left Panel - PDF Preview */
 .left-panel { flex: 1; background: #e8eaed; display: flex; flex-direction: column; position: relative; overflow: hidden; }
-.pdf-container { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; overflow: auto; }
+.pdf-container { flex: 1; display: flex; align-items: flex-start; justify-content: center; position: relative; overflow: auto; padding: 20px; }
 .pdf-placeholder { text-align: center; color: #9aa0a6; }
 .pdf-placeholder svg { width: 64px; height: 64px; margin-bottom: 12px; opacity: 0.5; }
 .pdf-placeholder p { font-size: 14px; }
-.canvas-wrapper { position: relative; display: inline-block; }
+.canvas-wrapper { position: relative; display: inline-block; line-height: 0; }
 .canvas-wrapper canvas { display: block; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
 .overlay-canvas { position: absolute; top: 0; left: 0; cursor: crosshair; }
 .page-nav { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; background: #fff; border-top: 1px solid #e0e0e0; flex-shrink: 0; }
@@ -279,16 +279,21 @@ let pdfDoc = null;
 let currentPage = 1;
 let totalPages = 0;
 let pdfPages = []; // canvas images per page
-let extractionRegions = []; // [{id, label, x, y, w, h}]
+let extractionRegions = []; // [{id, label, xRatio, yRatio, wRatio, hRatio}]
 let ocrResults = {}; // {pageNum: [{label, value, region}]}
 let activeResultPage = 1;
-let scale = 1.5;
+let previewScale = 1;
 let isDrawing = false;
 let drawStart = null;
 let regionIdCounter = 0;
 let pdfArrayBuffer = null;
 let pdfFileName = null;
+let currentPageMetrics = null;
 let exportDestination = localStorage.getItem('nab_ai_ocr_export_destination') || 'csv';
+const pageAnalysisCache = new Map();
+const BASE_VIEWPORT_SCALE = 1;
+const OCR_RENDER_SCALE = 2;
+const MIN_REGION_RATIO = 0.01;
 if (!['csv', 'spreadsheet'].includes(exportDestination)) {
   exportDestination = 'csv';
 }
@@ -311,6 +316,160 @@ const STORAGE_KEYS = {
   sheetName: 'nab_ai_ocr_sheet_name'
 };
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function escapeAttr(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function getCanvasRectFromRegion(region, width = overlayCanvas.width, height = overlayCanvas.height) {
+  return {
+    x: region.xRatio * width,
+    y: region.yRatio * height,
+    w: region.wRatio * width,
+    h: region.hRatio * height
+  };
+}
+
+function getPageRectFromRegion(region, pageWidth, pageHeight) {
+  return {
+    x: region.xRatio * pageWidth,
+    y: region.yRatio * pageHeight,
+    w: region.wRatio * pageWidth,
+    h: region.hRatio * pageHeight
+  };
+}
+
+function createRegionFromRect(label, rect, pageWidth, pageHeight) {
+  const x = clamp(rect.x, 0, pageWidth);
+  const y = clamp(rect.y, 0, pageHeight);
+  const w = clamp(rect.w, 0, pageWidth - x);
+  const h = clamp(rect.h, 0, pageHeight - y);
+  return {
+    id: ++regionIdCounter,
+    label,
+    xRatio: pageWidth > 0 ? x / pageWidth : 0,
+    yRatio: pageHeight > 0 ? y / pageHeight : 0,
+    wRatio: pageWidth > 0 ? w / pageWidth : 0,
+    hRatio: pageHeight > 0 ? h / pageHeight : 0
+  };
+}
+
+function createRegionFromCanvasRect(label, rect) {
+  return createRegionFromRect(label, rect, overlayCanvas.width, overlayCanvas.height);
+}
+
+function sortTextItems(items) {
+  return [...items].sort((a, b) => {
+    const ay = a.y + a.h / 2;
+    const by = b.y + b.h / 2;
+    if (Math.abs(ay - by) > Math.max(a.h, b.h) * 0.6) {
+      return ay - by;
+    }
+    return a.x - b.x;
+  });
+}
+
+function buildTextFromItems(items) {
+  if (!items.length) return '';
+  const sorted = sortTextItems(items);
+  const lines = [];
+
+  sorted.forEach(item => {
+    const centerY = item.y + item.h / 2;
+    let line = lines[lines.length - 1];
+    if (!line || Math.abs(line.centerY - centerY) > Math.max(line.avgHeight, item.h) * 0.7) {
+      line = { centerY, avgHeight: item.h, items: [] };
+      lines.push(line);
+    } else {
+      line.centerY = (line.centerY * line.items.length + centerY) / (line.items.length + 1);
+      line.avgHeight = (line.avgHeight * line.items.length + item.h) / (line.items.length + 1);
+    }
+    line.items.push(item);
+  });
+
+  return lines.map(line => {
+    const parts = [];
+    const lineItems = [...line.items].sort((a, b) => a.x - b.x);
+    lineItems.forEach((item, index) => {
+      if (index > 0) {
+        const prev = lineItems[index - 1];
+        const gap = item.x - (prev.x + prev.w);
+        if (gap > Math.max(2, line.avgHeight * 0.25)) {
+          parts.push(' ');
+        }
+      }
+      parts.push(item.str);
+    });
+    return parts.join('').trim();
+  }).filter(Boolean).join('\n');
+}
+
+function getRectOverlapRatio(item, rect) {
+  const overlapX = Math.max(0, Math.min(item.x + item.w, rect.x + rect.w) - Math.max(item.x, rect.x));
+  const overlapY = Math.max(0, Math.min(item.y + item.h, rect.y + rect.h) - Math.max(item.y, rect.y));
+  const overlapArea = overlapX * overlapY;
+  const itemArea = Math.max(1, item.w * item.h);
+  const centerX = item.x + item.w / 2;
+  const centerY = item.y + item.h / 2;
+  const centerInside = centerX >= rect.x && centerX <= rect.x + rect.w && centerY >= rect.y && centerY <= rect.y + rect.h;
+  return centerInside ? Math.max(overlapArea / itemArea, 0.5) : overlapArea / itemArea;
+}
+
+function extractTextFromRegionItems(textItems, region, pageWidth, pageHeight) {
+  const rect = getPageRectFromRegion(region, pageWidth, pageHeight);
+  const matched = textItems.filter(item => getRectOverlapRatio(item, rect) >= 0.2);
+  return buildTextFromItems(matched);
+}
+
+async function getPageAnalysis(pageNum) {
+  if (pageAnalysisCache.has(pageNum)) {
+    return pageAnalysisCache.get(pageNum);
+  }
+
+  const page = await pdfDoc.getPage(pageNum);
+  const baseViewport = page.getViewport({ scale: BASE_VIEWPORT_SCALE });
+  const textContent = await page.getTextContent();
+  const textItems = textContent.items
+    .filter(item => item.str && item.str.trim())
+    .map((item, index) => {
+      const tx = pdfjsLib.Util.transform(baseViewport.transform, item.transform);
+      const height = Math.hypot(tx[2], tx[3]) || Math.abs(item.height || 0) || 12;
+      const width = Math.max(item.width * baseViewport.scale, 1);
+      return {
+        id: index + 1,
+        str: item.str.trim(),
+        x: tx[4],
+        y: tx[5] - height,
+        w: width,
+        h: height
+      };
+    });
+
+  const analysis = {
+    page,
+    baseViewport,
+    pageWidth: baseViewport.width,
+    pageHeight: baseViewport.height,
+    textItems,
+    hasUsableText: textItems.length >= 8 && textItems.reduce((sum, item) => sum + item.str.length, 0) >= 20
+  };
+  pageAnalysisCache.set(pageNum, analysis);
+  return analysis;
+}
+
+function getPreviewScaleForPage(pageWidth, pageHeight) {
+  const availableWidth = Math.max(pdfContainer.clientWidth - 48, 320);
+  const availableHeight = Math.max(pdfContainer.clientHeight - 48, 320);
+  return clamp(Math.min(availableWidth / pageWidth, availableHeight / pageHeight, 2), 0.2, 2);
+}
+
 // Console logging
 function logConsole(msg, type = '') {
   const now = new Date();
@@ -330,6 +489,10 @@ document.getElementById('pdfInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   pdfFileName = file.name;
+  extractionRegions = [];
+  ocrResults = {};
+  pageAnalysisCache.clear();
+  currentPageMetrics = null;
   logConsole(`PDFファイル「${file.name}」を読み込み中...`, 'info');
   const arrayBuffer = await file.arrayBuffer();
   pdfArrayBuffer = arrayBuffer.slice(0);
@@ -343,6 +506,9 @@ document.getElementById('pdfInput').addEventListener('change', async (e) => {
     canvasWrapper.style.display = 'inline-block';
     pageNav.style.display = 'flex';
     document.getElementById('btnAutoDetect').disabled = false;
+    document.getElementById('btnOcr').disabled = true;
+    document.getElementById('resultsSection').style.display = 'none';
+    updateExtractionList();
     await renderPage(currentPage);
     updatePageNav();
   } catch (err) {
@@ -351,14 +517,23 @@ document.getElementById('pdfInput').addEventListener('change', async (e) => {
 });
 
 async function renderPage(num) {
-  const page = await pdfDoc.getPage(num);
-  const viewport = page.getViewport({ scale });
+  const analysis = await getPageAnalysis(num);
+  previewScale = getPreviewScaleForPage(analysis.pageWidth, analysis.pageHeight);
+  const viewport = analysis.page.getViewport({ scale: previewScale });
   pdfCanvas.width = viewport.width;
   pdfCanvas.height = viewport.height;
   overlayCanvas.width = viewport.width;
   overlayCanvas.height = viewport.height;
+  currentPageMetrics = {
+    pageNum: num,
+    pageWidth: analysis.pageWidth,
+    pageHeight: analysis.pageHeight,
+    previewScale
+  };
   const ctx = pdfCanvas.getContext('2d');
-  await page.render({ canvasContext: ctx, viewport }).promise;
+  await analysis.page.render({ canvasContext: ctx, viewport }).promise;
+  pdfContainer.scrollTop = 0;
+  pdfContainer.scrollLeft = 0;
   drawRegions();
 }
 
@@ -368,11 +543,11 @@ function updatePageNav() {
   document.getElementById('nextPage').disabled = currentPage >= totalPages;
 }
 
-function changePage(delta) {
+async function changePage(delta) {
   const newPage = currentPage + delta;
   if (newPage >= 1 && newPage <= totalPages) {
     currentPage = newPage;
-    renderPage(currentPage);
+    await renderPage(currentPage);
     updatePageNav();
     if (ocrResults[currentPage]) {
       showResultPage(currentPage);
@@ -414,14 +589,14 @@ overlayCanvas.addEventListener('mouseup', (e) => {
   const y = e.clientY - rect.top;
   const w = Math.abs(x - drawStart.x);
   const h = Math.abs(y - drawStart.y);
-  if (w > 10 && h > 10) {
-    const region = {
-      id: ++regionIdCounter,
-      label: `新規項目${regionIdCounter}`,
+  if (w / overlayCanvas.width > MIN_REGION_RATIO && h / overlayCanvas.height > MIN_REGION_RATIO) {
+    const nextIndex = regionIdCounter + 1;
+    const region = createRegionFromCanvasRect(`新規項目${nextIndex}`, {
       x: Math.min(drawStart.x, x),
       y: Math.min(drawStart.y, y),
-      w, h
-    };
+      w,
+      h
+    });
     extractionRegions.push(region);
     updateExtractionList();
     drawRegions();
@@ -436,27 +611,27 @@ function drawRegions() {
   ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
   const colors = ['#1a73e8', '#ea4335', '#34a853', '#fbbc04', '#9334e6', '#e8710a', '#1a73e8', '#ea4335'];
   extractionRegions.forEach((r, i) => {
+    const rect = getCanvasRectFromRegion(r);
     const color = colors[i % colors.length];
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
-    ctx.fillStyle = color.replace(')', ', 0.08)').replace('rgb', 'rgba').replace('#', '');
-    // Convert hex to rgba
     const hex = color;
     const bigint = parseInt(hex.slice(1), 16);
     const cr = (bigint >> 16) & 255;
     const cg = (bigint >> 8) & 255;
     const cb = bigint & 255;
     ctx.fillStyle = `rgba(${cr}, ${cg}, ${cb}, 0.08)`;
-    ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
     // Label
     ctx.font = '12px sans-serif';
     ctx.fillStyle = '#fff';
     const tw = ctx.measureText(r.label).width + 8;
     ctx.fillStyle = color;
-    ctx.fillRect(r.x, r.y - 20, tw, 20);
+    const labelY = Math.max(0, rect.y - 20);
+    ctx.fillRect(rect.x, labelY, tw, 20);
     ctx.fillStyle = '#fff';
-    ctx.fillText(r.label, r.x + 4, r.y - 6);
+    ctx.fillText(r.label, rect.x + 4, labelY + 14);
   });
 }
 
@@ -475,7 +650,7 @@ function updateExtractionList() {
     const item = document.createElement('div');
     item.className = 'extraction-item';
     item.innerHTML = `
-      <div class="label"><input type="text" value="${r.label}" onchange="renameRegion(${r.id}, this.value)"></div>
+      <div class="label"><input type="text" value="${escapeAttr(r.label)}" onchange="renameRegion(${r.id}, this.value)"></div>
       <button class="delete-btn" onclick="deleteRegion(${r.id})" title="削除">✕</button>
     `;
     container.appendChild(item);
@@ -600,6 +775,113 @@ async function callGemini(prompt, imageBase64 = null) {
   return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
+async function detectRegionsFromTextLayer(pageNum) {
+  const analysis = await getPageAnalysis(pageNum);
+  const serializedItems = analysis.textItems.map(item => ({
+    id: item.id,
+    text: item.str,
+    x: Math.round(item.x),
+    y: Math.round(item.y),
+    w: Math.round(item.w),
+    h: Math.round(item.h)
+  }));
+
+  const prompt = `以下はPDFの1ページ目から抽出した、正確な文字片の一覧です。
+各 item は text と、その item 自体の正確な座標を持っています。
+
+あなたの仕事:
+- この帳票で「値」として抽出すべき重要フィールドを特定する
+- 見出しではなく、実際の値が入っている itemIds を返す
+- ラベル名は日本語で返す
+- 見積書・請求書・発注書系の書類なら、宛名、番号、発行者情報、日付、支払条件、有効期限、振込先、合計金額、明細1行目を優先する
+- 同じ値が複数 item に分かれている場合は itemIds に複数入れる
+- 不明な項目は返さない
+
+JSONのみで返してください:
+[
+  {"label":"宛名","itemIds":[12,13,14]},
+  {"label":"見積番号","itemIds":[30]},
+  {"label":"発行者住所","itemIds":[44,45,46]}
+]
+
+文字片一覧:
+${JSON.stringify(serializedItems)}`;
+
+  const result = await callGemini(prompt);
+  const jsonMatch = result.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    throw new Error('テキスト座標ベースのAI応答からJSONを取得できませんでした');
+  }
+
+  const detected = JSON.parse(jsonMatch[0]);
+  const regions = [];
+  detected.forEach(entry => {
+    if (!entry || !entry.label || !Array.isArray(entry.itemIds) || entry.itemIds.length === 0) {
+      return;
+    }
+    const matchedItems = entry.itemIds
+      .map(itemId => analysis.textItems.find(item => item.id === Number(itemId)))
+      .filter(Boolean);
+
+    if (matchedItems.length === 0) {
+      return;
+    }
+
+    const left = Math.min(...matchedItems.map(item => item.x));
+    const top = Math.min(...matchedItems.map(item => item.y));
+    const right = Math.max(...matchedItems.map(item => item.x + item.w));
+    const bottom = Math.max(...matchedItems.map(item => item.y + item.h));
+    const padding = Math.max(4, Math.round(Math.max(...matchedItems.map(item => item.h)) * 0.25));
+
+    regions.push(createRegionFromRect(entry.label, {
+      x: left - padding,
+      y: top - padding,
+      w: (right - left) + padding * 2,
+      h: (bottom - top) + padding * 2
+    }, analysis.pageWidth, analysis.pageHeight));
+  });
+
+  return regions;
+}
+
+async function detectRegionsFromImage(pageNum) {
+  const analysis = await getPageAnalysis(pageNum);
+  const viewport = analysis.page.getViewport({ scale: OCR_RENDER_SCALE });
+  const tmpCanvas = document.createElement('canvas');
+  tmpCanvas.width = viewport.width;
+  tmpCanvas.height = viewport.height;
+  const ctx = tmpCanvas.getContext('2d');
+  await analysis.page.render({ canvasContext: ctx, viewport }).promise;
+  const base64 = tmpCanvas.toDataURL('image/png').split(',')[1];
+
+  const prompt = `この書類画像を分析して、OCRで抽出すべき主要フィールドを特定してください。
+返すのは「見出し」ではなく「値」が書かれている領域です。
+ラベルは可能な限り日本語で返してください。
+画像サイズは幅${viewport.width}px、高さ${viewport.height}pxです。
+
+JSONのみで返してください:
+[
+  {"label":"宛名","x":100,"y":120,"w":320,"h":42},
+  {"label":"見積番号","x":520,"y":60,"w":130,"h":40}
+]`;
+
+  const result = await callGemini(prompt, base64);
+  const jsonMatch = result.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    throw new Error('画像ベースのAI応答からJSONを取得できませんでした');
+  }
+
+  const detected = JSON.parse(jsonMatch[0]);
+  return detected
+    .filter(entry => entry && entry.label)
+    .map(entry => createRegionFromRect(entry.label, {
+      x: Number(entry.x) / OCR_RENDER_SCALE,
+      y: Number(entry.y) / OCR_RENDER_SCALE,
+      w: Number(entry.w) / OCR_RENDER_SCALE,
+      h: Number(entry.h) / OCR_RENDER_SCALE
+    }, analysis.pageWidth, analysis.pageHeight));
+}
+
 // Auto-detect regions
 async function autoDetectRegions() {
   if (!pdfDoc) return;
@@ -608,67 +890,23 @@ async function autoDetectRegions() {
   btn.innerHTML = '<span class="spinner"></span> AI解析中...';
   logConsole('AIによる抽出領域の自動特定を開始...', 'info');
   try {
-    // Render page 1 to get image
-    const page = await pdfDoc.getPage(1);
-    const viewport = page.getViewport({ scale });
-    const tmpCanvas = document.createElement('canvas');
-    tmpCanvas.width = viewport.width;
-    tmpCanvas.height = viewport.height;
-    const ctx = tmpCanvas.getContext('2d');
-    await page.render({ canvasContext: ctx, viewport }).promise;
-    const dataUrl = tmpCanvas.toDataURL('image/png');
-    const base64 = dataUrl.split(',')[1];
-
-    logConsole('1ページ目の画像をAIモデルに送信中...', 'info');
-
-    const prompt = `この書類画像を分析して、OCRで抽出すべきフィールド（ラベルと値のペア）を特定してください。
-各フィールドについて、画像内でのおおよその位置をピクセル座標で示してください。
-画像のサイズは幅${viewport.width}px、高さ${viewport.height}pxです。
-
-以下のJSON形式で応答してください（JSONのみ、説明文不要）:
-[
-  {"label": "フィールド名", "x": 左端X座標, "y": 上端Y座標, "w": 幅, "h": 高さ},
-  ...
-]
-
-注意:
-- ラベル（見出し）ではなく、値が書かれている領域の座標を返してください
-- 座標はピクセル単位で、画像の左上を原点としてください
-- 主要なフィールドを漏れなく検出してください`;
-
-    const result = await callGemini(prompt, base64);
-    logConsole('AI応答を受信、解析中...', 'info');
-
-    // Parse JSON from response
-    let regions;
-    try {
-      const jsonMatch = result.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        regions = JSON.parse(jsonMatch[0]);
-      } else {
-        throw new Error('JSON not found');
+    const analysis = await getPageAnalysis(1);
+    if (analysis.hasUsableText) {
+      logConsole('PDFのテキスト座標を検出しました。高精度モードで解析します...', 'info');
+      extractionRegions = await detectRegionsFromTextLayer(1);
+      if (extractionRegions.length === 0) {
+        logConsole('テキスト座標モードで検出できなかったため、画像ベース解析へフォールバックします...', 'warn');
+        extractionRegions = await detectRegionsFromImage(1);
       }
-    } catch (e) {
-      logConsole(`AI応答の解析に失敗: ${e.message}`, 'error');
-      logConsole(`応答内容: ${result.substring(0, 200)}...`, 'warn');
-      return;
+    } else {
+      logConsole('テキスト座標が取得できないため、画像ベースで解析します...', 'info');
+      extractionRegions = await detectRegionsFromImage(1);
     }
 
-    extractionRegions = [];
-    regions.forEach(r => {
-      extractionRegions.push({
-        id: ++regionIdCounter,
-        label: r.label,
-        x: Math.max(0, r.x),
-        y: Math.max(0, r.y),
-        w: Math.min(r.w, viewport.width - r.x),
-        h: Math.min(r.h, viewport.height - r.y)
-      });
-    });
-
+    extractionRegions = extractionRegions.filter(region => region.wRatio > 0 && region.hRatio > 0);
     updateExtractionList();
     drawRegions();
-    document.getElementById('btnOcr').disabled = false;
+    document.getElementById('btnOcr').disabled = extractionRegions.length === 0;
     logConsole(`抽出領域を ${extractionRegions.length} 件特定しました`, 'success');
   } catch (err) {
     logConsole(`エラー: ${err.message}`, 'error');
@@ -692,60 +930,72 @@ async function executeOCR() {
   try {
     for (let p = 1; p <= totalPages; p++) {
       logConsole(`ページ ${p}/${totalPages} を処理中...`, 'info');
-      const page = await pdfDoc.getPage(p);
-      const viewport = page.getViewport({ scale });
+      const analysis = await getPageAnalysis(p);
+
+      if (analysis.hasUsableText) {
+        logConsole(`ページ ${p}: PDFテキストから高精度抽出を実行中...`, 'info');
+        ocrResults[p] = extractionRegions.map(region => ({
+          label: region.label,
+          value: extractTextFromRegionItems(analysis.textItems, region, analysis.pageWidth, analysis.pageHeight) || '不明',
+          region
+        }));
+        logConsole(`ページ ${p}: テキスト座標ベースで抽出しました`, 'success');
+        continue;
+      }
+
+      const viewport = analysis.page.getViewport({ scale: OCR_RENDER_SCALE });
       const tmpCanvas = document.createElement('canvas');
       tmpCanvas.width = viewport.width;
       tmpCanvas.height = viewport.height;
       const ctx = tmpCanvas.getContext('2d');
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      const dataUrl = tmpCanvas.toDataURL('image/png');
-      const base64 = dataUrl.split(',')[1];
+      await analysis.page.render({ canvasContext: ctx, viewport }).promise;
+      const base64 = tmpCanvas.toDataURL('image/png').split(',')[1];
 
-      logConsole(`ページ ${p}: AIモデルによる探索抽出を実行中...`, 'info');
+      logConsole(`ページ ${p}: 画像OCRを実行中...`, 'info');
 
-      const fieldsDesc = extractionRegions.map(r =>
-        `- "${r.label}": 画像座標 (x=${Math.round(r.x)}, y=${Math.round(r.y)}, w=${Math.round(r.w)}, h=${Math.round(r.h)})`
-      ).join('\n');
+      const fieldsDesc = extractionRegions.map(region => {
+        const rect = getPageRectFromRegion(region, viewport.width, viewport.height);
+        return `- "${region.label}": 画像座標 (x=${Math.round(rect.x)}, y=${Math.round(rect.y)}, w=${Math.round(rect.w)}, h=${Math.round(rect.h)})`;
+      }).join('\n');
 
-      const prompt = `この書類画像からOCR（文字認識）を実行してください。
-以下の抽出領域が定義されています。各領域に対応する値を読み取ってください。
+      const prompt = `この書類画像からOCRを実行してください。
+以下の抽出領域ごとに値だけを読み取ってください。
 
 抽出領域:
 ${fieldsDesc}
 
 画像サイズ: ${viewport.width}px × ${viewport.height}px
 
-以下のJSON形式で応答してください（JSONのみ、説明文不要）:
+JSONのみで返してください:
 [
-  {"label": "フィールド名", "value": "読み取った値"},
-  ...
+  {"label":"フィールド名","value":"読み取った値"}
 ]
 
 注意:
-- 値が読み取れない場合は "不明" としてください
-- 手書き文字も含めて最大限読み取ってください
-- 改行が含まれる場合はそのまま含めてください`;
+- 値が読めない場合は "不明"
+- 改行がある値は改行を維持
+- 各要素の順番は抽出領域の順番を維持`;
 
       const result = await callGemini(prompt, base64);
       logConsole(`ページ ${p}: AI応答を受信`, 'success');
 
       try {
         const jsonMatch = result.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          ocrResults[p] = parsed.map((item, idx) => ({
-            label: item.label,
-            value: item.value || '不明',
-            region: extractionRegions[idx] || null
-          }));
+        if (!jsonMatch) {
+          throw new Error('JSON not found');
         }
+        const parsed = JSON.parse(jsonMatch[0]);
+        ocrResults[p] = extractionRegions.map((region, idx) => ({
+          label: region.label,
+          value: parsed[idx]?.value || '不明',
+          region
+        }));
       } catch (e) {
         logConsole(`ページ ${p}: 結果解析エラー`, 'error');
-        ocrResults[p] = extractionRegions.map(r => ({
-          label: r.label,
+        ocrResults[p] = extractionRegions.map(region => ({
+          label: region.label,
           value: '解析エラー',
-          region: r
+          region
         }));
       }
     }
@@ -801,7 +1051,7 @@ function showResultPage(pageNum) {
     field.onclick = () => highlightRegion(r.region, field);
     field.innerHTML = `
       <div class="result-field-label">${r.label}</div>
-      <input class="result-field-value" type="text" value="${escapeHtml(r.value)}" onchange="updateResult(${pageNum}, ${idx}, this.value)" onclick="event.stopPropagation()">
+      <input class="result-field-value" type="text" value="${escapeAttr(r.value)}" onchange="updateResult(${pageNum}, ${idx}, this.value)" onclick="event.stopPropagation()">
     `;
     container.appendChild(field);
   });
@@ -815,11 +1065,12 @@ function highlightRegion(region, fieldEl) {
   // Draw highlight
   drawRegions();
   const ctx = overlayCanvas.getContext('2d');
+  const rect = getCanvasRectFromRegion(region);
   ctx.strokeStyle = '#ea4335';
   ctx.lineWidth = 3;
   ctx.fillStyle = 'rgba(234, 67, 53, 0.15)';
-  ctx.fillRect(region.x, region.y, region.w, region.h);
-  ctx.strokeRect(region.x, region.y, region.w, region.h);
+  ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+  ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
 }
 
 function updateResult(pageNum, idx, newValue) {
@@ -950,6 +1201,12 @@ const savedExportSettings = getExportSettings();
 document.getElementById('webAppUrlInput').value = savedExportSettings.webAppUrl;
 document.getElementById('sheetNameInput').value = savedExportSettings.sheetName;
 updateExportActionButton();
+
+window.addEventListener('resize', () => {
+  if (pdfDoc && currentPage) {
+    renderPage(currentPage);
+  }
+});
 </script>
 </body>
 </html>
