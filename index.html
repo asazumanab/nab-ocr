@@ -411,6 +411,73 @@ function buildTextFromItems(items) {
   }).filter(Boolean).join('\n');
 }
 
+function buildTextLines(items) {
+  if (!items.length) return [];
+  const sorted = sortTextItems(items);
+  const lines = [];
+
+  sorted.forEach(item => {
+    const centerY = item.y + item.h / 2;
+    let line = lines[lines.length - 1];
+    if (!line || Math.abs(line.centerY - centerY) > Math.max(line.avgHeight, item.h) * 0.7) {
+      line = { centerY, avgHeight: item.h, items: [] };
+      lines.push(line);
+    } else {
+      line.centerY = (line.centerY * line.items.length + centerY) / (line.items.length + 1);
+      line.avgHeight = (line.avgHeight * line.items.length + item.h) / (line.items.length + 1);
+    }
+    line.items.push(item);
+  });
+
+  return lines.map(line => {
+    const lineItems = [...line.items].sort((a, b) => a.x - b.x);
+    return {
+      itemIds: lineItems.map(item => item.id),
+      text: buildTextFromItems(lineItems),
+      x: Math.round(Math.min(...lineItems.map(item => item.x))),
+      y: Math.round(Math.min(...lineItems.map(item => item.y))),
+      w: Math.round(Math.max(...lineItems.map(item => item.x + item.w)) - Math.min(...lineItems.map(item => item.x))),
+      h: Math.round(Math.max(...lineItems.map(item => item.y + item.h)) - Math.min(...lineItems.map(item => item.y)))
+    };
+  }).filter(line => line.text);
+}
+
+function normalizeDetectedLabel(label) {
+  const text = String(label || '').trim();
+  if (!text) return text;
+
+  const rules = [
+    [/^(宛名|宛先|宛先名|宛名先)$/u, '宛先'],
+    [/^(発行日|見積日|請求日)$/u, '発行日'],
+    [/^(見積有効期限|有効期限|支払期限_上部)$/u, '見積有効期限'],
+    [/^(発行者住所|発行者所在地|住所)$/u, '発行者住所'],
+    [/^(発行者名|発行会社名|会社名)$/u, '発行者名'],
+    [/^(発行者代表者名|代表者名|担当者)$/u, '発行者代表者名'],
+    [/^(発行者電話番号|発行者TEL|TEL)$/u, '発行者電話番号'],
+    [/^(発行者FAX番号|発行者FAX|FAX)$/u, '発行者FAX番号'],
+    [/^(合計金額|ご請求額|請求額)$/u, '合計金額'],
+    [/^(支払方法)$/u, '支払方法'],
+    [/^(支払期限)$/u, '支払期限'],
+    [/^(振込先銀行名|振込先銀行)$/u, '振込先銀行名'],
+    [/^(振込先支店名|振込先支店)$/u, '振込先支店名'],
+    [/^(振込先種別|口座種別)$/u, '振込先種別'],
+    [/^(振込先口座番号|口座番号)$/u, '振込先口座番号'],
+    [/^(振込先口座名義|振込先名義|口座名義)$/u, '振込先口座名義'],
+    [/^(明細1行目|明細_1行目|明細1)$/u, '明細1行目'],
+    [/^(本体金額|参考_本体|本体)$/u, '本体金額'],
+    [/^(消費税|参考_消費税)$/u, '消費税'],
+    [/^(合計金額_下部|下部合計|参考_合計)$/u, '合計金額_下部']
+  ];
+
+  for (const [pattern, normalized] of rules) {
+    if (pattern.test(text)) {
+      return normalized;
+    }
+  }
+
+  return text;
+}
+
 function getRectOverlapRatio(item, rect) {
   const overlapX = Math.max(0, Math.min(item.x + item.w, rect.x + rect.w) - Math.max(item.x, rect.x));
   const overlapY = Math.max(0, Math.min(item.y + item.h, rect.y + rect.h) - Math.max(item.y, rect.y));
@@ -777,6 +844,7 @@ async function callGemini(prompt, imageBase64 = null) {
 
 async function detectRegionsFromTextLayer(pageNum) {
   const analysis = await getPageAnalysis(pageNum);
+  const textLines = buildTextLines(analysis.textItems);
   const serializedItems = analysis.textItems.map(item => ({
     id: item.id,
     text: item.str,
@@ -788,21 +856,29 @@ async function detectRegionsFromTextLayer(pageNum) {
 
   const prompt = `以下はPDFの1ページ目から抽出した、正確な文字片の一覧です。
 各 item は text と、その item 自体の正確な座標を持っています。
+また、読みやすいように line 単位の一覧も付けています。
 
 あなたの仕事:
 - この帳票で「値」として抽出すべき重要フィールドを特定する
 - 見出しではなく、実際の値が入っている itemIds を返す
-- ラベル名は日本語で返す
-- 見積書・請求書・発注書系の書類なら、宛名、番号、発行者情報、日付、支払条件、有効期限、振込先、合計金額、明細1行目を優先する
+- ラベル名は必ず日本語で返す
+- 次の項目を優先して、見つかるものはできるだけ漏れなく返す:
+  宛先, 発行日, 見積有効期限, 発行者住所, 発行者名, 発行者代表者名, 発行者電話番号, 発行者FAX番号, 合計金額, 支払方法, 支払期限, 振込先銀行名, 振込先支店名, 振込先種別, 振込先口座番号, 振込先口座名義, 明細1行目, 本体金額, 消費税, 合計金額_下部
 - 同じ値が複数 item に分かれている場合は itemIds に複数入れる
+- できるだけ「意味のあるまとまり」で返す。細かい単語単位には分割しない
+- 表がある場合、最初の明細行は個別セルではなく 1つのまとまった項目として "明細1行目" を返す
+- 下部の金額集計欄がある場合は、本体金額・消費税・合計金額_下部 を優先して返す
 - 不明な項目は返さない
 
 JSONのみで返してください:
 [
-  {"label":"宛名","itemIds":[12,13,14]},
+  {"label":"宛先","itemIds":[12,13,14]},
   {"label":"見積番号","itemIds":[30]},
   {"label":"発行者住所","itemIds":[44,45,46]}
 ]
+
+line 一覧:
+${JSON.stringify(textLines)}
 
 文字片一覧:
 ${JSON.stringify(serializedItems)}`;
@@ -815,8 +891,13 @@ ${JSON.stringify(serializedItems)}`;
 
   const detected = JSON.parse(jsonMatch[0]);
   const regions = [];
+  const seenLabels = new Set();
   detected.forEach(entry => {
     if (!entry || !entry.label || !Array.isArray(entry.itemIds) || entry.itemIds.length === 0) {
+      return;
+    }
+    const normalizedLabel = normalizeDetectedLabel(entry.label);
+    if (!normalizedLabel || seenLabels.has(normalizedLabel)) {
       return;
     }
     const matchedItems = entry.itemIds
@@ -833,12 +914,13 @@ ${JSON.stringify(serializedItems)}`;
     const bottom = Math.max(...matchedItems.map(item => item.y + item.h));
     const padding = Math.max(4, Math.round(Math.max(...matchedItems.map(item => item.h)) * 0.25));
 
-    regions.push(createRegionFromRect(entry.label, {
+    regions.push(createRegionFromRect(normalizedLabel, {
       x: left - padding,
       y: top - padding,
       w: (right - left) + padding * 2,
       h: (bottom - top) + padding * 2
     }, analysis.pageWidth, analysis.pageHeight));
+    seenLabels.add(normalizedLabel);
   });
 
   return regions;
@@ -856,12 +938,16 @@ async function detectRegionsFromImage(pageNum) {
 
   const prompt = `この書類画像を分析して、OCRで抽出すべき主要フィールドを特定してください。
 返すのは「見出し」ではなく「値」が書かれている領域です。
-ラベルは可能な限り日本語で返してください。
+ラベルは必ず日本語で返してください。
+次の項目を優先して、見つかるものはできるだけ漏れなく返してください:
+宛先, 発行日, 見積有効期限, 発行者住所, 発行者名, 発行者代表者名, 発行者電話番号, 発行者FAX番号, 合計金額, 支払方法, 支払期限, 振込先銀行名, 振込先支店名, 振込先種別, 振込先口座番号, 振込先口座名義, 明細1行目, 本体金額, 消費税, 合計金額_下部
+細かい単語単位ではなく、意味のあるまとまりで返してください。
+表がある場合、最初の明細行は "明細1行目" として1つの大きな領域で返してください。
 画像サイズは幅${viewport.width}px、高さ${viewport.height}pxです。
 
 JSONのみで返してください:
 [
-  {"label":"宛名","x":100,"y":120,"w":320,"h":42},
+  {"label":"宛先","x":100,"y":120,"w":320,"h":42},
   {"label":"見積番号","x":520,"y":60,"w":130,"h":40}
 ]`;
 
@@ -872,14 +958,18 @@ JSONのみで返してください:
   }
 
   const detected = JSON.parse(jsonMatch[0]);
+  const seenLabels = new Set();
   return detected
     .filter(entry => entry && entry.label)
-    .map(entry => createRegionFromRect(entry.label, {
+    .map(entry => ({
+      label: normalizeDetectedLabel(entry.label),
       x: Number(entry.x) / OCR_RENDER_SCALE,
       y: Number(entry.y) / OCR_RENDER_SCALE,
       w: Number(entry.w) / OCR_RENDER_SCALE,
       h: Number(entry.h) / OCR_RENDER_SCALE
-    }, analysis.pageWidth, analysis.pageHeight));
+    }))
+    .filter(entry => entry.label && !seenLabels.has(entry.label) && (seenLabels.add(entry.label) || true))
+    .map(entry => createRegionFromRect(entry.label, entry, analysis.pageWidth, analysis.pageHeight));
 }
 
 // Auto-detect regions
