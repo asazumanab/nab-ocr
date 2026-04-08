@@ -447,9 +447,13 @@ function normalizeDetectedLabel(label) {
   if (!text) return text;
 
   const rules = [
+    [/^(帳票タイトル|書類タイトル|見積書タイトル|請求書タイトル|タイトル)$/u, '帳票タイトル'],
     [/^(宛名|宛先|宛先名|宛名先)$/u, '宛先'],
+    [/^(宛先敬称|宛名敬称|敬称)$/u, '宛先敬称'],
     [/^(発行日|見積日|請求日)$/u, '発行日'],
+    [/^(見積番号|請求番号|発行番号|No\.?|番号)$/u, '書類番号'],
     [/^(見積有効期限|有効期限|支払期限_上部)$/u, '見積有効期限'],
+    [/^(発行者郵便番号|郵便番号)$/u, '発行者郵便番号'],
     [/^(発行者住所|発行者所在地|住所)$/u, '発行者住所'],
     [/^(発行者名|発行会社名|会社名)$/u, '発行者名'],
     [/^(発行者代表者名|代表者名|担当者)$/u, '発行者代表者名'],
@@ -463,7 +467,7 @@ function normalizeDetectedLabel(label) {
     [/^(振込先種別|口座種別)$/u, '振込先種別'],
     [/^(振込先口座番号|口座番号)$/u, '振込先口座番号'],
     [/^(振込先口座名義|振込先名義|口座名義)$/u, '振込先口座名義'],
-    [/^(明細1行目|明細_1行目|明細1)$/u, '明細1行目'],
+    [/^(明細エリア|明細全体|明細行|明細1行目|明細_1行目|明細1)$/u, '明細エリア'],
     [/^(本体金額|参考_本体|本体)$/u, '本体金額'],
     [/^(消費税|参考_消費税)$/u, '消費税'],
     [/^(合計金額_下部|下部合計|参考_合計)$/u, '合計金額_下部']
@@ -476,6 +480,103 @@ function normalizeDetectedLabel(label) {
   }
 
   return text;
+}
+
+function createRegionFromLine(label, line, pageWidth, pageHeight, paddingMultiplier = 0.35) {
+  const padding = Math.max(4, Math.round(line.h * paddingMultiplier));
+  return createRegionFromRect(label, {
+    x: line.x - padding,
+    y: line.y - padding,
+    w: line.w + padding * 2,
+    h: line.h + padding * 2
+  }, pageWidth, pageHeight);
+}
+
+function expandDetailRegionToFilledRows(analysis, region) {
+  const rect = getPageRectFromRegion(region, analysis.pageWidth, analysis.pageHeight);
+  const horizontalPadding = Math.max(12, rect.w * 0.04);
+  const candidateLines = buildTextLines(analysis.textItems)
+    .filter(line => {
+      const overlapX = Math.max(
+        0,
+        Math.min(line.x + line.w, rect.x + rect.w + horizontalPadding) - Math.max(line.x, rect.x - horizontalPadding)
+      );
+      return line.y + line.h >= rect.y - 8 &&
+        line.y <= analysis.pageHeight * 0.82 &&
+        overlapX >= Math.min(line.w, rect.w) * 0.15;
+    })
+    .sort((a, b) => a.y - b.y);
+
+  if (candidateLines.length < 2) {
+    return region;
+  }
+
+  const anchorIndex = candidateLines.findIndex(line => line.y + line.h >= rect.y - 8);
+  if (anchorIndex === -1) {
+    return region;
+  }
+
+  const contiguous = [candidateLines[anchorIndex]];
+  for (let i = anchorIndex + 1; i < candidateLines.length; i++) {
+    const previous = contiguous[contiguous.length - 1];
+    const current = candidateLines[i];
+    const verticalGap = current.y - (previous.y + previous.h);
+    const maxAllowedGap = Math.max(26, previous.h * 1.8);
+    if (verticalGap > maxAllowedGap) {
+      break;
+    }
+    contiguous.push(current);
+  }
+
+  if (contiguous.length < 2) {
+    return region;
+  }
+
+  const top = Math.min(rect.y, ...contiguous.map(line => line.y));
+  const left = Math.min(rect.x, ...contiguous.map(line => line.x));
+  const right = Math.max(rect.x + rect.w, ...contiguous.map(line => line.x + line.w));
+  const bottom = Math.max(rect.y + rect.h, ...contiguous.map(line => line.y + line.h));
+
+  return createRegionFromRect(region.label, {
+    x: left - 6,
+    y: top - 6,
+    w: (right - left) + 12,
+    h: (bottom - top) + 12
+  }, analysis.pageWidth, analysis.pageHeight);
+}
+
+function augmentRegionsWithHeuristics(analysis, regions) {
+  const normalized = [];
+  const seen = new Set();
+
+  regions.forEach(region => {
+    const label = normalizeDetectedLabel(region.label);
+    if (!label || seen.has(label)) return;
+    let nextRegion = { ...region, label };
+    if (label === '明細エリア') {
+      nextRegion = expandDetailRegionToFilledRows(analysis, nextRegion);
+    }
+    normalized.push(nextRegion);
+    seen.add(label);
+  });
+
+  const lines = buildTextLines(analysis.textItems);
+
+  const maybeAdd = (label, predicate, options = {}) => {
+    if (seen.has(label)) return;
+    const line = lines.find(predicate);
+    if (!line) return;
+    normalized.push(createRegionFromLine(label, line, analysis.pageWidth, analysis.pageHeight, options.paddingMultiplier));
+    seen.add(label);
+  };
+
+  maybeAdd('帳票タイトル', line => /(見積書|請求書|納品書|領収書|発注書)/.test(line.text) && line.y < analysis.pageHeight * 0.22);
+  maybeAdd('宛先敬称', line => /(御中|様)$/.test(line.text) && line.y < analysis.pageHeight * 0.35, { paddingMultiplier: 0.2 });
+  maybeAdd('発行者郵便番号', line => /〒?\d{3}-\d{4}/.test(line.text) && line.y < analysis.pageHeight * 0.45, { paddingMultiplier: 0.2 });
+  maybeAdd('振込先種別', line => /(普通|当座|貯蓄)/.test(line.text) && line.y > analysis.pageHeight * 0.2 && line.y < analysis.pageHeight * 0.7, { paddingMultiplier: 0.2 });
+  maybeAdd('書類番号', line => /((No\.?|番号)\s*[:：]?\s*\S+)|(^\d{3,}$)/i.test(line.text) && line.y < analysis.pageHeight * 0.25, { paddingMultiplier: 0.25 });
+
+  return normalized;
 }
 
 function getRectOverlapRatio(item, rect) {
@@ -491,7 +592,8 @@ function getRectOverlapRatio(item, rect) {
 
 function extractTextFromRegionItems(textItems, region, pageWidth, pageHeight) {
   const rect = getPageRectFromRegion(region, pageWidth, pageHeight);
-  const matched = textItems.filter(item => getRectOverlapRatio(item, rect) >= 0.2);
+  const overlapThreshold = region.label === '明細エリア' ? 0.05 : 0.2;
+  const matched = textItems.filter(item => getRectOverlapRatio(item, rect) >= overlapThreshold);
   return buildTextFromItems(matched);
 }
 
@@ -863,17 +965,18 @@ async function detectRegionsFromTextLayer(pageNum) {
 - 見出しではなく、実際の値が入っている itemIds を返す
 - ラベル名は必ず日本語で返す
 - 次の項目を優先して、見つかるものはできるだけ漏れなく返す:
-  宛先, 発行日, 見積有効期限, 発行者住所, 発行者名, 発行者代表者名, 発行者電話番号, 発行者FAX番号, 合計金額, 支払方法, 支払期限, 振込先銀行名, 振込先支店名, 振込先種別, 振込先口座番号, 振込先口座名義, 明細1行目, 本体金額, 消費税, 合計金額_下部
+  帳票タイトル, 宛先, 宛先敬称, 書類番号, 発行日, 見積有効期限, 発行者郵便番号, 発行者住所, 発行者名, 発行者代表者名, 発行者電話番号, 発行者FAX番号, 合計金額, 支払方法, 支払期限, 振込先銀行名, 振込先支店名, 振込先種別, 振込先口座番号, 振込先口座名義, 明細エリア, 本体金額, 消費税, 合計金額_下部
+- 上の一覧にない場合でも、明らかに重要な値が見えていれば追加で返してよい
 - 同じ値が複数 item に分かれている場合は itemIds に複数入れる
 - できるだけ「意味のあるまとまり」で返す。細かい単語単位には分割しない
-- 表がある場合、最初の明細行は個別セルではなく 1つのまとまった項目として "明細1行目" を返す
+- 表がある場合、入力済みの明細行全体を 1つのまとまった項目として "明細エリア" を返す
 - 下部の金額集計欄がある場合は、本体金額・消費税・合計金額_下部 を優先して返す
 - 不明な項目は返さない
 
 JSONのみで返してください:
 [
   {"label":"宛先","itemIds":[12,13,14]},
-  {"label":"見積番号","itemIds":[30]},
+  {"label":"書類番号","itemIds":[30]},
   {"label":"発行者住所","itemIds":[44,45,46]}
 ]
 
@@ -936,19 +1039,20 @@ async function detectRegionsFromImage(pageNum) {
   await analysis.page.render({ canvasContext: ctx, viewport }).promise;
   const base64 = tmpCanvas.toDataURL('image/png').split(',')[1];
 
-  const prompt = `この書類画像を分析して、OCRで抽出すべき主要フィールドを特定してください。
+const prompt = `この書類画像を分析して、OCRで抽出すべき主要フィールドを特定してください。
 返すのは「見出し」ではなく「値」が書かれている領域です。
 ラベルは必ず日本語で返してください。
 次の項目を優先して、見つかるものはできるだけ漏れなく返してください:
-宛先, 発行日, 見積有効期限, 発行者住所, 発行者名, 発行者代表者名, 発行者電話番号, 発行者FAX番号, 合計金額, 支払方法, 支払期限, 振込先銀行名, 振込先支店名, 振込先種別, 振込先口座番号, 振込先口座名義, 明細1行目, 本体金額, 消費税, 合計金額_下部
+帳票タイトル, 宛先, 宛先敬称, 書類番号, 発行日, 見積有効期限, 発行者郵便番号, 発行者住所, 発行者名, 発行者代表者名, 発行者電話番号, 発行者FAX番号, 合計金額, 支払方法, 支払期限, 振込先銀行名, 振込先支店名, 振込先種別, 振込先口座番号, 振込先口座名義, 明細エリア, 本体金額, 消費税, 合計金額_下部
+上の一覧にない場合でも、明らかに重要な値が見えていれば追加で返してよいです。
 細かい単語単位ではなく、意味のあるまとまりで返してください。
-表がある場合、最初の明細行は "明細1行目" として1つの大きな領域で返してください。
+表がある場合、入力済みの明細行全体を "明細エリア" として1つの大きな領域で返してください。
 画像サイズは幅${viewport.width}px、高さ${viewport.height}pxです。
 
 JSONのみで返してください:
 [
   {"label":"宛先","x":100,"y":120,"w":320,"h":42},
-  {"label":"見積番号","x":520,"y":60,"w":130,"h":40}
+  {"label":"書類番号","x":520,"y":60,"w":130,"h":40}
 ]`;
 
   const result = await callGemini(prompt, base64);
@@ -993,7 +1097,8 @@ async function autoDetectRegions() {
       extractionRegions = await detectRegionsFromImage(1);
     }
 
-    extractionRegions = extractionRegions.filter(region => region.wRatio > 0 && region.hRatio > 0);
+    extractionRegions = augmentRegionsWithHeuristics(analysis, extractionRegions)
+      .filter(region => region.wRatio > 0 && region.hRatio > 0);
     updateExtractionList();
     drawRegions();
     document.getElementById('btnOcr').disabled = extractionRegions.length === 0;
